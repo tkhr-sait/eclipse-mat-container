@@ -1,8 +1,8 @@
 # docker build -t eclipse-mat:1.16.1 .
 # CLI
-# docker run --rm -e CLI=true -v ./input:/input -v ./reports:/reports eclipse-mat:1.16.1 /input/sun_jdk6_18_x64.hprof
+# docker run --rm -e CLI=true -e MAT_MEMORY=4g -v ./input:/home/matuser/input eclipse-mat:1.16.1 /home/matuser/input/sun_jdk6_18_x64.hprof
 # GUI
-# docker run --rm -v ./input:/input -p 6901:6901 eclipse-mat:1.16.1
+# docker run --rm -e MAT_MEMORY=4g -v ./input:/home/matuser/input -p 6901:6901 eclipse-mat:1.16.1
 FROM eclipse-temurin:21-jre
 
 # MAT のダウンロードURL（最新版は公式サイトから確認）
@@ -81,9 +81,8 @@ RUN mkdir -p /home/matuser/.vnc && \
     # VNCユーザーを作成（SecurityTypes Noneでも内部的に必要）
     su - matuser -c "mkdir -p ~/.vnc && echo -e 'kasmvnc\nkasmvnc' | vncpasswd -u matuser -w -r"
 
-# レポート出力用ディレクトリ
-RUN mkdir -p /reports && \
-    chown -R matuser:matuser /opt/mat /reports
+# MAT ディレクトリの所有権設定
+RUN chown -R matuser:matuser /opt/mat
 
 # PATH と JAVA_HOME を設定
 ENV PATH=/opt/mat:${PATH}

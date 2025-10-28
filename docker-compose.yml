@@ -1,0 +1,33 @@
+version: "3.8"
+
+services:
+  # GUIモード（デフォルト）
+  eclipse-mat-gui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/tkhr-sait/eclipse-mat-container:latest
+    container_name: eclipse-mat-gui
+    ports:
+      - "6901:6901"
+    volumes:
+      - ./input:/home/matuser/input
+    environment:
+      - MAT_MEMORY=4g
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+  # CLIモード（docker-compose run で使用）
+  eclipse-mat-cli:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/tkhr-sait/eclipse-mat-container:latest
+    environment:
+      - CLI=true
+      - MAT_MEMORY=4g
+    volumes:
+      - ./input:/home/matuser/input
+    profiles:
+      - cli

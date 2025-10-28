@@ -1,25 +1,70 @@
 #!/bin/bash
 
-# 引数が渡された場合で、かつshellコマンドの場合のみ、その引数を実行してスクリプトを終了
-# （例: docker run ... eclipse-mat bash -c "command"）
-if [ "$(id -u)" = "0" ] && [ $# -gt 0 ] && [ "$1" != "/entrypoint.sh" ] && [ "$CLI" != "true" ]; then
-    # 最初の引数がshellコマンド（bash, sh, など）の場合、matuserとして実行
-    case "$1" in
-        bash|sh|/bin/bash|/bin/sh)
-            exec su - matuser -c "cd $(pwd) && exec $*"
-            ;;
-    esac
-fi
-
-# matuserとして実行するために切り替え（rootで起動された場合のみ）
+# root起動時のUID/GID自動調整（ホストとの権限問題を解消）
 if [ "$(id -u)" = "0" ] && [ -z "$_REEXEC" ]; then
-    # rootの場合、matuserとして再実行（環境変数を保持）
+    # UID/GID検出の優先順位:
+    # 1. 環境変数 HOST_UID/HOST_GID（明示指定された場合）
+    # 2. /home/matuser/input ディレクトリの所有権
+    # 3. デフォルト値 1000:1000
+
+    TARGET_UID=${HOST_UID:-$(stat -c '%u' /home/matuser/input 2>/dev/null || echo 1000)}
+    TARGET_GID=${HOST_GID:-$(stat -c '%g' /home/matuser/input 2>/dev/null || echo 1000)}
+
+    echo "Adjusting container user to UID:GID = $TARGET_UID:$TARGET_GID"
+
+    # matuserのUID/GIDを動的に変更
+    usermod -u "$TARGET_UID" matuser 2>/dev/null
+    groupmod -g "$TARGET_GID" matuser 2>/dev/null
+    chown -R matuser:matuser /home/matuser /opt/mat 2>/dev/null || true
+
+    # matuserとして再実行（環境変数を保持）
     export _REEXEC=1
     export HOME=/home/matuser
     export CLI="$CLI"
     export PATH="$PATH"
     export JAVA_HOME="$JAVA_HOME"
-    exec su matuser -c "export CLI='$CLI' && export PATH='$PATH' && export JAVA_HOME='$JAVA_HOME' && cd /home/matuser && exec $0 $*"
+    export MAT_MEMORY="$MAT_MEMORY"
+    exec su matuser -c "export CLI='$CLI' && export PATH='$PATH' && export JAVA_HOME='$JAVA_HOME' && export MAT_MEMORY='$MAT_MEMORY' && cd /home/matuser && exec $0 $*"
+fi
+
+# MAT メモリ設定（環境変数で指定、デフォルトは4g）
+MAT_MEMORY=${MAT_MEMORY:-4g}
+echo "Configuring Eclipse MAT with ${MAT_MEMORY} heap memory..."
+
+# MemoryAnalyzer.ini の -Xmx 設定を動的に更新
+if [ -f /opt/mat/MemoryAnalyzer.ini ]; then
+    # 既存の -Xmx 行を新しい値で置換
+    sed -i "s/^-Xmx.*/-Xmx${MAT_MEMORY}/" /opt/mat/MemoryAnalyzer.ini
+
+    # 初期ヒープサイズ（Xmxの50%）を計算して設定
+    MAT_MEMORY_NUM=$(echo ${MAT_MEMORY} | sed 's/[^0-9]//g')
+    MAT_MEMORY_UNIT=$(echo ${MAT_MEMORY} | sed 's/[0-9]//g')
+    MAT_MEMORY_INIT=$((MAT_MEMORY_NUM / 2))${MAT_MEMORY_UNIT}
+
+    # JVM最適化オプションを追加（既存の-Xmsがあれば置換、なければ追加）
+    if grep -q "^-Xms" /opt/mat/MemoryAnalyzer.ini; then
+        sed -i "s/^-Xms.*/-Xms${MAT_MEMORY_INIT}/" /opt/mat/MemoryAnalyzer.ini
+    else
+        sed -i "/^-Xmx/a -Xms${MAT_MEMORY_INIT}" /opt/mat/MemoryAnalyzer.ini
+    fi
+
+    # その他の最適化オプションを追加（存在しない場合のみ）
+    grep -q "^-XX:-UseGCOverheadLimit" /opt/mat/MemoryAnalyzer.ini || \
+        echo "-XX:-UseGCOverheadLimit" >> /opt/mat/MemoryAnalyzer.ini
+
+    grep -q "^-XX:+UseG1GC" /opt/mat/MemoryAnalyzer.ini || \
+        echo "-XX:+UseG1GC" >> /opt/mat/MemoryAnalyzer.ini
+
+    grep -q "^-XX:MaxGCPauseMillis" /opt/mat/MemoryAnalyzer.ini || \
+        echo "-XX:MaxGCPauseMillis=200" >> /opt/mat/MemoryAnalyzer.ini
+
+    grep -q "^-XX:+UseStringDeduplication" /opt/mat/MemoryAnalyzer.ini || \
+        echo "-XX:+UseStringDeduplication" >> /opt/mat/MemoryAnalyzer.ini
+
+    grep -q "^-XX:MaxMetaspaceSize" /opt/mat/MemoryAnalyzer.ini || \
+        echo "-XX:MaxMetaspaceSize=256m" >> /opt/mat/MemoryAnalyzer.ini
+
+    echo "JVM optimization options applied: G1GC, StringDeduplication, GCOverheadLimit disabled"
 fi
 
 # CLI モードのチェック（環境変数で明示的に指定された場合のみ）
@@ -27,19 +72,18 @@ if [ "$CLI" = "true" ]; then
     # CLI モード
     # ヘルプ表示
     if [ $# -eq 0 ]; then
-        echo "Usage: docker run --rm -e CLI=true -v <host-dump>:/input.hprof -v <host-report-dir>:/reports eclipse-mat /input.hprof [report-type]"
+        echo "Usage: docker run --rm -e CLI=true -v <host-dir>:/home/matuser/input eclipse-mat /home/matuser/input/<file>.hprof"
         echo ""
         echo "Available modes:"
         echo "  GUI mode (default) - Web-based GUI on port 6901"
         echo "  CLI mode          - Run with -e CLI=true for automated analysis"
         echo ""
-        echo "CLI mode report types:"
-        echo "  leak_suspects (default) - Memory leak suspects report"
-        echo "  overview                - Overview report"
-        echo "  top_components          - Top components report"
+        echo "Reports are generated in the same directory as the input file."
         echo ""
-        echo "Example (CLI): docker run --rm -e CLI=true -v \$(pwd)/heap.hprof:/input.hprof -v \$(pwd)/output:/reports eclipse-mat /input.hprof"
-        echo "Example (GUI): docker run --rm -p 6901:6901 -v \$(pwd)/input:/input eclipse-mat"
+        echo "Example (CLI): docker run --rm -e CLI=true -v ./input:/home/matuser/input eclipse-mat /home/matuser/input/heap.hprof"
+        echo "Example (GUI): docker run --rm -p 6901:6901 -v ./input:/home/matuser/input eclipse-mat"
+        echo ""
+        echo "Note: UID/GID is automatically detected from mounted volumes for proper file permissions."
         exit 1
     fi
     # CLI モードの処理は後続のコードで実行
@@ -97,15 +141,6 @@ EOF
     # さらに待機してウィンドウマネージャーの起動を確実にする
     sleep 2
 
-    # /input ディレクトリの内容を ~/work にコピー（書き込み権限の問題を回避）
-    if [ -d /input ] && [ "$(ls -A /input 2>/dev/null)" ]; then
-        echo "Copying files from /input to ~/work for analysis..."
-        mkdir -p ~/work
-        cp -r /input/* ~/work/ 2>/dev/null || true
-        echo "Files copied to ~/work (writable directory)"
-        echo ""
-    fi
-
     # Eclipse MAT の GUI を起動
     echo "Starting Eclipse Memory Analyzer..."
     DISPLAY=:1 /opt/mat/MemoryAnalyzer "$@" &
@@ -120,8 +155,6 @@ fi
 
 # 入力ファイル（ヒープダンプ）
 INPUT_FILE="$1"
-REPORT_TYPE="${2:-leak_suspects}"
-OUTPUT_DIR="/reports"
 
 # ファイルが存在しない場合
 if [ ! -f "$INPUT_FILE" ]; then
@@ -129,69 +162,31 @@ if [ ! -f "$INPUT_FILE" ]; then
     exit 1
 fi
 
-# 作業ディレクトリを/tmpに作成（書き込み権限の問題を回避）
-WORK_DIR="/tmp/mat_work_$$"
-mkdir -p "$WORK_DIR"
-
-# 入力ファイルを作業ディレクトリにコピー
-WORK_FILE="$WORK_DIR/$(basename "$INPUT_FILE")"
-echo "Copying input file to writable directory..."
-cp "$INPUT_FILE" "$WORK_FILE"
-echo "Working on: $WORK_FILE"
-echo ""
+# 入力ファイルの絶対パスを取得
+INPUT_FILE=$(readlink -f "$INPUT_FILE")
+INPUT_DIR=$(dirname "$INPUT_FILE")
 
 # MAT CLI のコマンド：レポート生成
 echo "Starting heap analysis with Eclipse MAT CLI..."
-echo "Input: $INPUT_FILE (copied to $WORK_FILE)"
-echo "Report type: $REPORT_TYPE"
-echo "Output directory: $OUTPUT_DIR"
+echo "Input: $INPUT_FILE"
+echo "Output directory: $INPUT_DIR (same as input)"
 echo ""
 
 # ParseHeapDump.sh を使用してヒープダンプを解析しレポート生成
-/opt/mat/ParseHeapDump.sh "$WORK_FILE" \
+# レポートは入力ファイルと同じディレクトリに生成される
+/opt/mat/ParseHeapDump.sh "$INPUT_FILE" \
     org.eclipse.mat.api:suspects \
     org.eclipse.mat.api:overview \
     org.eclipse.mat.api:top_components
 
 # レポート生成が成功したか確認
 if [ $? -eq 0 ]; then
-    # 生成されたレポートを/reportsにコピー
-    DUMP_NAME=$(basename "$WORK_FILE" .hprof)
-
-    echo ""
-    echo "📦 Copying and organizing reports to $OUTPUT_DIR..."
-
-    # 出力ディレクトリを作成（権限問題対策として親が実行する場合も）
-    mkdir -p "$OUTPUT_DIR" 2>/dev/null || true
-
-    # .zip ファイルを探してコピー
-    find "$WORK_DIR" -name "${DUMP_NAME}*.zip" -type f | while read zipfile; do
-        echo "  Copying $(basename "$zipfile")..."
-        cp "$zipfile" "$OUTPUT_DIR/" 2>/dev/null || chmod -R 777 "$OUTPUT_DIR" && cp "$zipfile" "$OUTPUT_DIR/"
-
-        # ZIPファイル名からレポート種類を取得（例: input_Leak_Suspects.zip -> Leak_Suspects）
-        REPORT_NAME=$(basename "$zipfile" .zip | sed "s/${DUMP_NAME}_//")
-        EXTRACT_DIR="$OUTPUT_DIR/$REPORT_NAME"
-
-        echo "  Extracting to $REPORT_NAME/"
-        mkdir -p "$EXTRACT_DIR" 2>/dev/null || true
-        unzip -q "$zipfile" -d "$EXTRACT_DIR" 2>/dev/null || true
-    done
-
-    # その他のファイル（HTML、indexなど）もコピー
-    find "$WORK_DIR" -name "${DUMP_NAME}*" -type f \( -name "*.html" -o -name "*.txt" -o -name "*.index" \) -exec cp {} "$OUTPUT_DIR/" \; 2>/dev/null || true
-
     echo ""
     echo "✅ Heap analysis completed successfully!"
-    echo "📄 Reports generated at: $OUTPUT_DIR"
+    echo "📄 Reports generated at: $INPUT_DIR"
     echo ""
-
-    # 作業ディレクトリをクリーンアップ
-    rm -rf "$WORK_DIR"
 else
     echo ""
     echo "❌ Heap analysis failed."
-    # 作業ディレクトリをクリーンアップ
-    rm -rf "$WORK_DIR"
     exit 1
 fi
