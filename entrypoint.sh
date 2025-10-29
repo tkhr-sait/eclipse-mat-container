@@ -97,22 +97,52 @@ else
     export LANG=ja_JP.UTF-8
     export LC_ALL=ja_JP.UTF-8
 
+    # ソフトウェアレンダリング強制（GPU/ハードウェアアクセラレーション無効化）
+    # Windows/WSL2環境でのX関連エラー対策
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export GALLIUM_DRIVER=llvmpipe
+    export GDK_RENDERING=image
+    export WEBKIT_DISABLE_COMPOSITING_MODE=1
+    export WEBKIT_DISABLE_DMABUF_RENDERER=1
+    echo "Software rendering mode enabled (GPU disabled for compatibility)"
+
     # kasmvnc の起動（非対話的に起動）
     export DISPLAY=:1
     # 非対話モードで起動（kasmvnc.yamlで prompt: false を設定済み）
-    echo "Starting VNC server..."
+    echo "Starting VNC server on $DISPLAY..."
+    echo "VNC will be accessible at http://localhost:6901"
     vncserver $DISPLAY -depth 24 -geometry 1920x1080 \
         -websocketPort 6901 \
         -interface 0.0.0.0 \
         -select-de manual \
         -SecurityTypes None \
-        -disableBasicAuth
+        -disableBasicAuth \
+        -httpd /usr/share/kasmvnc/www \
+        -sslOnly 0 2>&1 | tee /tmp/vncserver.log
 
     VNC_EXIT_CODE=$?
     if [ $VNC_EXIT_CODE -ne 0 ]; then
-        echo "VNC server failed to start. Exit code: $VNC_EXIT_CODE"
-        echo "Checking VNC log..."
-        cat ~/.vnc/*.log 2>/dev/null || echo "No log files found"
+        echo "========================================="
+        echo "❌ VNC server failed to start"
+        echo "Exit code: $VNC_EXIT_CODE"
+        echo "========================================="
+        echo ""
+        echo "VNC startup log:"
+        cat /tmp/vncserver.log 2>/dev/null || echo "No startup log found"
+        echo ""
+        echo "VNC session log:"
+        cat ~/.vnc/*.log 2>/dev/null || echo "No session log files found"
+        echo ""
+        echo "Environment info:"
+        echo "  DISPLAY=$DISPLAY"
+        echo "  LIBGL_ALWAYS_SOFTWARE=$LIBGL_ALWAYS_SOFTWARE"
+        echo "  User: $(whoami), UID: $(id -u), GID: $(id -g)"
+        echo ""
+        echo "Troubleshooting tips:"
+        echo "  1. Check if port 6901 is already in use"
+        echo "  2. Ensure Docker has enough resources (memory/CPU)"
+        echo "  3. For WSL2 on Windows: restart Docker Desktop"
+        echo "========================================="
         exit 1
     fi
 
@@ -142,11 +172,23 @@ EOF
     sleep 2
 
     # Eclipse MAT の GUI を起動
-    echo "Starting Eclipse Memory Analyzer..."
-    DISPLAY=:1 /opt/mat/MemoryAnalyzer "$@" &
+    echo "Starting Eclipse Memory Analyzer with software rendering..."
+    echo "Environment: LIBGL_ALWAYS_SOFTWARE=$LIBGL_ALWAYS_SOFTWARE"
+    DISPLAY=:1 /opt/mat/MemoryAnalyzer "$@" > /tmp/mat.log 2>&1 &
+    MAT_PID=$!
+
+    # Eclipse MATの起動を確認
+    sleep 3
+    if ps -p $MAT_PID > /dev/null 2>&1; then
+        echo "✅ Eclipse MAT started successfully (PID: $MAT_PID)"
+    else
+        echo "⚠️  Eclipse MAT process may have failed. Check logs:"
+        cat /tmp/mat.log 2>/dev/null || echo "No MAT log available"
+    fi
 
     # コンテナを維持
-    echo "✅ Eclipse MAT is running. Press Ctrl+C to stop."
+    echo "✅ Eclipse MAT is running. Access at http://localhost:6901"
+    echo "Press Ctrl+C to stop."
     wait
     exit 0
 fi

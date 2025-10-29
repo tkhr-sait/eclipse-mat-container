@@ -21,6 +21,9 @@ RUN apt-get update && \
     dbus-x11 xauth \
     # WebKit GTK for Eclipse SWT browser
     libwebkit2gtk-4.1-0 \
+    # Mesa ソフトウェアレンダラー (llvmpipe) - GPU非使用でのレンダリング用
+    libgl1-mesa-dri libgl1 libglx-mesa0 \
+    mesa-utils \
     # kasmvnc 用
     openbox \
     xterm \
