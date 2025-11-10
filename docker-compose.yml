@@ -14,9 +14,8 @@ services:
       - ./input:/home/matuser/input
     environment:
       - MAT_MEMORY=4g
-    restart: unless-stopped
-    stdin_open: true
-    tty: true
+    # 共有メモリサイズを拡張（VNCサーバーとEclipse用）
+    shm_size: '2gb'
 
   # CLIモード（docker-compose run で使用）
   eclipse-mat-cli:

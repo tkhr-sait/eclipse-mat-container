@@ -17,6 +17,16 @@ if [ "$(id -u)" = "0" ] && [ -z "$_REEXEC" ]; then
     groupmod -g "$TARGET_GID" matuser 2>/dev/null
     chown -R matuser:matuser /home/matuser /opt/mat 2>/dev/null || true
 
+    # D-Bus システムバスの初期化（GUIモードのみ、root権限が必要なため、ユーザー切り替え前に実行）
+    # Windows/WSL2環境でのGTK/GDKアプリケーションのクラッシュ対策
+    if [ "$CLI" != "true" ]; then
+        if [ ! -d /run/dbus ]; then
+            mkdir -p /run/dbus
+        fi
+        rm -f /var/run/dbus/pid 2>/dev/null || true
+        dbus-daemon --system --fork 2>/dev/null || echo "System D-Bus already running or not needed"
+    fi
+
     # matuserとして再実行（環境変数を保持）
     export _REEXEC=1
     export HOME=/home/matuser
@@ -105,6 +115,20 @@ else
     export WEBKIT_DISABLE_COMPOSITING_MODE=1
     export WEBKIT_DISABLE_DMABUF_RENDERER=1
     echo "Software rendering mode enabled (GPU disabled for compatibility)"
+
+    # D-Bus セッションバスの初期化（matuser権限で実行）
+    # Windows/WSL2環境でのGTK/GDKアプリケーションのクラッシュ対策
+    echo "Initializing D-Bus session..."
+
+    # セッションバスの起動
+    if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+        eval $(dbus-launch --sh-syntax 2>/dev/null) || echo "D-Bus session launch failed (may not be critical)"
+        export DBUS_SESSION_BUS_ADDRESS
+    fi
+
+    echo "D-Bus session initialized"
+    echo "  User: $(whoami) (UID: $(id -u))"
+    echo "  DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-<not set>}"
 
     # kasmvnc の起動（非対話的に起動）
     export DISPLAY=:1
