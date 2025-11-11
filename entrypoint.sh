@@ -130,11 +130,46 @@ else
     echo "  User: $(whoami) (UID: $(id -u))"
     echo "  DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-<not set>}"
 
+    # Openbox の設定を作成（アプリケーションを最大化）
+    # VNC起動前に作成しておく必要がある
+    mkdir -p ~/.config/openbox
+    cat > ~/.config/openbox/rc.xml << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <applications>
+    <application class="*">
+      <maximized>true</maximized>
+      <decor>no</decor>
+    </application>
+  </applications>
+</openbox_config>
+EOF
+
+    # VNC用のxstartupスクリプトを作成（VNCがデスクトップ環境を起動するため）
+    # Windows/WSL2環境でのDISPLAYエラー対策：VNCセッション内でopenboxを起動
+    echo "Creating VNC xstartup script..."
+    cat > ~/.vnc/xstartup << 'XSTARTUP'
+#!/bin/bash
+
+# ソフトウェアレンダリング環境変数（GPU不要化）
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+export GDK_RENDERING=image
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+
+# Openboxをメインプロセスとして起動（VNCセッションと統合）
+exec openbox
+XSTARTUP
+    chmod +x ~/.vnc/xstartup
+    echo "VNC xstartup created"
+
     # kasmvnc の起動（非対話的に起動）
     export DISPLAY=:1
     # 非対話モードで起動（kasmvnc.yamlで prompt: false を設定済み）
     echo "Starting VNC server on $DISPLAY..."
     echo "VNC will be accessible at http://localhost:6901"
+    echo "  (xstartup will automatically launch Openbox)"
     vncserver $DISPLAY -depth 24 -geometry 1920x1080 \
         -websocketPort 6901 \
         -interface 0.0.0.0 \
@@ -170,30 +205,26 @@ else
         exit 1
     fi
 
-    # VNC サーバーが起動するまで待機
+    # VNC サーバーが起動するまで待機（ソケットファイルの存在確認）
     echo "Waiting for VNC server to be ready..."
-    sleep 5
+    X11_SOCKET="/tmp/.X11-unix/X1"
+    MAX_WAIT=30
+    WAIT_COUNT=0
 
-    # Openbox の設定を作成（アプリケーションを最大化）
-    mkdir -p ~/.config/openbox
-    cat > ~/.config/openbox/rc.xml << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<openbox_config xmlns="http://openbox.org/3.4/rc">
-  <applications>
-    <application class="*">
-      <maximized>true</maximized>
-      <decor>no</decor>
-    </application>
-  </applications>
-</openbox_config>
-EOF
+    while [ ! -S "$X11_SOCKET" ] && [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+        sleep 1
+        WAIT_COUNT=$((WAIT_COUNT + 1))
+        if [ $((WAIT_COUNT % 5)) -eq 0 ]; then
+            echo "  Still waiting for X11 socket... ($WAIT_COUNT/$MAX_WAIT)"
+        fi
+    done
 
-    # Openbox ウィンドウマネージャーを起動
-    echo "Starting Openbox window manager..."
-    DISPLAY=:1 openbox &
-
-    # さらに待機してウィンドウマネージャーの起動を確実にする
-    sleep 2
+    if [ -S "$X11_SOCKET" ]; then
+        echo "✅ VNC server is ready (X11 socket detected)"
+        echo "✅ Openbox should now be running (launched by VNC xstartup)"
+    else
+        echo "⚠️  VNC server may not be fully ready, but continuing anyway"
+    fi
 
     # Eclipse MAT の GUI を起動
     echo "Starting Eclipse Memory Analyzer with software rendering..."
@@ -201,14 +232,26 @@ EOF
     DISPLAY=:1 /opt/mat/MemoryAnalyzer "$@" > /tmp/mat.log 2>&1 &
     MAT_PID=$!
 
-    # Eclipse MATの起動を確認
-    sleep 3
-    if ps -p $MAT_PID > /dev/null 2>&1; then
-        echo "✅ Eclipse MAT started successfully (PID: $MAT_PID)"
-    else
-        echo "⚠️  Eclipse MAT process may have failed. Check logs:"
-        cat /tmp/mat.log 2>/dev/null || echo "No MAT log available"
-    fi
+    # Eclipse MATの起動を確認（プロセス確認を繰り返す）
+    echo "Waiting for Eclipse MAT to initialize..."
+    MAT_MAX_WAIT=20
+    MAT_WAIT=0
+    while [ $MAT_WAIT -lt $MAT_MAX_WAIT ]; do
+        if ps -p $MAT_PID > /dev/null 2>&1; then
+            # プロセスが生きている場合、もう少し待って安定するか確認
+            if [ $MAT_WAIT -ge 6 ]; then
+                echo "✅ Eclipse MAT started successfully (PID: $MAT_PID)"
+                break
+            fi
+        else
+            # プロセスが死んだ
+            echo "⚠️  Eclipse MAT process may have failed. Check logs:"
+            cat /tmp/mat.log 2>/dev/null || echo "No MAT log available"
+            break
+        fi
+        sleep 0.5
+        MAT_WAIT=$((MAT_WAIT + 1))
+    done
 
     # コンテナを維持
     echo "✅ Eclipse MAT is running. Access at http://localhost:6901"
